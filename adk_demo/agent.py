@@ -1,8 +1,43 @@
 import datetime
+import logging
+from pathlib import Path
 from zoneinfo import ZoneInfo, available_timezones
 from google.adk.agents import Agent
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
 import requests
 from typing import Optional
+
+# ============================================================================
+# LOGGING SETUP - 設定日誌記錄
+# ============================================================================
+
+log_dir = Path(__file__).parent.parent / "logs"
+log_dir.mkdir(exist_ok=True)
+
+logger = logging.getLogger("adk_monitor")
+logger.setLevel(logging.INFO)
+
+logger.handlers.clear()
+
+log_file = log_dir / f"agent_{datetime.datetime.now().strftime('%Y%m%d')}.log"
+file_handler = logging.FileHandler(log_file, encoding='utf-8')
+file_handler.setLevel(logging.INFO)
+
+# 設定 log 格式
+formatter = logging.Formatter(
+    '%(asctime)s | %(levelname)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+file_handler.setFormatter(formatter)
+
+# 加入 handler
+logger.addHandler(file_handler)
+
+logger.info(f"{'='*60}")
+logger.info(f"ADK Agent 監控日誌啟動 - Log 檔案: {log_file}")
+logger.info(f"{'='*60}")
 
 # 城市到時區的映射（常見城市）
 CITY_TIMEZONE_MAP = {
@@ -167,6 +202,76 @@ def get_current_time(city: str) -> dict:
         }
 
 
+# ============================================================================
+# CALLBACKS - 監控與追蹤
+# ============================================================================
+
+def before_model_callback(
+    callback_context: CallbackContext,
+    llm_request: LlmRequest,
+) -> None:
+    """在 LLM 呼叫前執行 - 記錄輸入內容"""
+    logger.info("="*60)
+    logger.info(f"[BEFORE MODEL] Agent: {callback_context.agent_name}")
+    
+    # 顯示用戶輸入
+    try:
+        if hasattr(llm_request, 'contents') and llm_request.contents:
+            latest_content = llm_request.contents[-1]
+            if hasattr(latest_content, 'parts') and latest_content.parts:
+                text = latest_content.parts[0].text if hasattr(latest_content.parts[0], 'text') else str(latest_content.parts[0])
+                logger.info(f"User Input: {text[:100]}...")
+    except Exception as e:
+        logger.debug(f"Error logging user input: {e}")
+    
+    # 顯示可用工具
+    try:
+        if hasattr(callback_context, 'agent') and hasattr(callback_context.agent, 'tools'):
+            tool_names = [tool.__name__ if callable(tool) else str(tool) for tool in callback_context.agent.tools]
+            logger.info(f"Available Tools: {', '.join(tool_names)}")
+    except Exception as e:
+        logger.debug(f"Error logging tools: {e}")
+    
+    logger.info("="*60)
+
+
+def after_model_callback(
+    callback_context: CallbackContext,
+    llm_response: LlmResponse,
+) -> None:
+    """在 LLM 回應後執行 - 記錄輸出內容和 Token 使用"""
+    logger.info("="*60)
+    logger.info(f"[AFTER MODEL] Agent: {callback_context.agent_name}")
+    
+    # 顯示模型回應
+    try:
+        if hasattr(llm_response, 'candidates') and llm_response.candidates:
+            candidate = llm_response.candidates[0]
+            if hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts'):
+                # 檢查是否有文字回應
+                for part in candidate.content.parts:
+                    if hasattr(part, 'text') and part.text:
+                        logger.info(f"Model Response: {part.text[:150]}...")
+                    # 檢查是否有工具呼叫
+                    if hasattr(part, 'function_call') and part.function_call:
+                        logger.info(f"Tool Call: {part.function_call.name}")
+                        logger.info(f"Arguments: {dict(part.function_call.args)}")
+    except Exception as e:
+        logger.debug(f"Error logging model response: {e}")
+    
+    # 顯示 Token 使用統計
+    try:
+        if hasattr(llm_response, 'usage_metadata') and llm_response.usage_metadata:
+            usage = llm_response.usage_metadata
+            logger.info(f"Token Usage:")
+            logger.info(f"   - Input: {usage.prompt_token_count}")
+            logger.info(f"   - Output: {usage.candidates_token_count}")
+            logger.info(f"   - Total: {usage.total_token_count}")
+    except Exception as e:
+        logger.debug(f"Error logging token usage: {e}")
+    
+    logger.info("="*60)
+
 root_agent = Agent(
     name="weather_time_agent",
     model="gemini-2.5-flash",
@@ -177,4 +282,6 @@ root_agent = Agent(
         "You are a helpful agent who can answer user questions about the time and weather in a city."
     ),
     tools=[get_weather, get_current_time],
+    before_model_callback=before_model_callback,
+    after_model_callback=after_model_callback,
 )
